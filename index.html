@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Image Wall Layout</title>
+<style>
+  :root { --bg:#ffffff; --panel:#f5f5f7; --line:#dcdce2; --text:#1d1d22; --mute:#6c6c78; --ok:#1c9a5f; --bad:#d63a3a; --acc:#e08a00; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:12px 20px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
+  h1 { font-size:16px; margin:0 8px 0 0; }
+  label { color:var(--mute); display:flex; align-items:center; gap:6px; }
+  select, button, input[type=number] { background:#ffffff; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font:inherit; }
+  button { cursor:pointer; } button:hover { background:#ececf0; }
+  input[type=number] { width:80px; }
+  #readout { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:8px 24px; padding:12px 16px; border-top:1px solid var(--line); }
+  .row { display:flex; justify-content:space-between; gap:12px; border-bottom:1px dashed var(--line); padding:2px 0; }
+  .row span:first-child { color:var(--mute); }
+  .pass { color:var(--ok); font-weight:600; } .fail { color:var(--bad); font-weight:600; }
+  #err { display:none; margin:16px; padding:14px; border:1px solid var(--bad); border-radius:8px; background:#fdeeee; }
+  #scroller { overflow-x:auto; padding:0; border-bottom:1px solid var(--line); }
+  #strip { position:relative; margin:0 16px; }
+  #midline { position:absolute; left:0; right:0; height:0; border-top:1px dashed #00000033; pointer-events:none; }
+  .col { position:absolute; cursor:pointer; }
+  .col .img { position:absolute; left:0; right:0; background-size:cover; background-position:center; background-color:#ddd; }
+  .col:hover .img { outline:1px solid var(--acc); outline-offset:-1px; }
+  .col.sel .img { outline:2px solid var(--acc); outline-offset:-2px; }
+  .col.ghost { opacity:.3; pointer-events:none; }
+  .seam { position:absolute; top:0; bottom:0; width:0; border-left:2px solid #e0457b; pointer-events:none; }
+  .seamlbl { position:absolute; top:6px; font-size:11px; color:#e0457b; white-space:nowrap; transform:translateX(-50%); }
+  .col .idx { position:absolute; left:50%; transform:translateX(-50%); font-size:9px; color:var(--mute); }
+  #info { padding:14px 16px; min-height:120px; }
+  #info img { height:90px; margin:4px 6px 4px 0; border-radius:3px; }
+  #tip { position:fixed; display:none; pointer-events:none; z-index:20; background:#000e; color:#fff; border:1px solid var(--acc); border-radius:5px; padding:3px 8px; font-size:13px; font-weight:600; }
+  .hint { color:var(--mute); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Image Wall Layout</h1>
+  <label>Layout
+    <select id="mode">
+      <option value="A">Even spread A (original)</option>
+      <option value="B">Even spread B</option>
+      <option value="C">Even spread C</option>
+      <option value="D">Even spread D</option>
+      <option value="E">Even spread E</option>
+    </select>
+  </label>
+  <label>Alignment
+    <select id="align">
+      <option value="natural" selected>Natural (singles vary)</option>
+      <option value="center">Center aligned</option>
+      <option value="top">Top aligned</option>
+    </select>
+  </label>
+  <label id="seedwrap">Heights seed <input type="number" id="seed" value="1"></label>
+  <span class="hint" id="overlap"></span>
+  <label>Zoom <input type="range" id="zoom" min="0.25" max="3" step="0.05" value="1"> <span id="zv">1.0×</span></label>
+  <label>Gap in pair (in) <input type="number" id="pairgap" value="0.125" step="0.125" min="0"></label>
+  <span class="hint">Click a column for details</span>
+</header>
+<div id="err"></div>
+<div id="scroller"><div id="strip"></div></div>
+<div id="tip"></div>
+<div id="info"><span class="hint">No column selected.</span></div>
+<div id="readout"></div>
+
+<script>
+// ---------- pure layout module ----------
+const U = 8;                       // units per inch (eighths)
+const PLAN = { room: 847, total: 365, h: 69, v: 296, ph: 22, pv: 87, gap: 1, hW: 32, vW: 24 };
+
+function mulberry(seed){ let a = seed>>>0; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a>>>15, 1|a); t = t + Math.imul(t ^ t>>>7, 61|t) ^ t; return ((t ^ t>>>14)>>>0)/4294967296; }; }
+
+// which of the `ncols` columns of one orientation are pairs (exactly `pairs` true), evenly spaced.
+// `off` (0..1) slides the even rhythm along the sequence, so each variant pairs up different images.
+function pairPattern(ncols, pairs, off){
+  const f = [];
+  for (let k=0;k<ncols;k++) f.push(Math.floor((k+1)*pairs/ncols + off) > Math.floor(k*pairs/ncols + off));
+  return f;
+}
+// images stay in file sequence; only the pair/single grouping changes
+function buildColumns(imgs, pairs, orient, off){
+  const flags = pairPattern(imgs.length - pairs, pairs, off), cols = []; let i = 0;
+  flags.forEach(p => { cols.push({ orient, images: p ? [imgs[i], imgs[i+1]] : [imgs[i]] }); i += p ? 2 : 1; });
+  return cols;
+}
+
+const VARIANTS = { A:0, B:0.5, C:0.62, D:0.75, E:0.88 };
+function layout(images, variant){
+  const off = VARIANTS[variant];
+  const H = images.filter(x => x.orient === 'h'), V = images.filter(x => x.orient === 'v');
+  const cols = buildColumns(H, PLAN.ph, 'h', off).concat(buildColumns(V, PLAN.pv, 'v', off));
+  return cols.sort((a,b) => a.images[0].seq - b.images[0].seq);   // keep the file sequence around the loop
+}
+function place(cols){ let x = 0; cols.forEach(c => { c.w = c.orient==='h' ? PLAN.hW : PLAN.vW; c.x = x; x += c.w + PLAN.gap; }); return x; }
+
+function verify(cols, total, images){
+  const cnt = (o,p) => cols.filter(c => c.orient===o && (c.images.length===2)===p).length;
+  const used = new Set(cols.flatMap(c => c.images.map(i => i.file)));
+  const t = {
+    'Columns = 256': cols.length === 256,
+    'Gaps = 256': cols.length === 256,
+    'H pairs 22 / V pairs 87': cnt('h',true)===22 && cnt('v',true)===87,
+    'H singles 25 / V singles 122': cnt('h',false)===25 && cnt('v',false)===122,
+    'Pairs are same orientation': cols.every(c => c.images.every(i => i.orient === c.orient)),
+    'Total width = 847 in (6776 units)': total === PLAN.room*U,
+    'All 365 images used once': used.size === images.length && cols.reduce((s,c)=>s+c.images.length,0) === images.length,
+  };
+  return { t, cnt };
+}
+
+// ---------- app ----------
+const $ = id => document.getElementById(id);
+const FIRST = 111, LAST = 475, DIR = 'Wall images/';
+let images = [], cols = [], sel = null;
+
+function loadAll(){
+  const files = []; for (let n=FIRST;n<=LAST;n++) files.push(`Ling_HyereeBiennale_${n}.jpg`);
+  return Promise.all(files.map((f,i) => new Promise(res => {
+    const im = new Image();
+    im.onload = () => res({ file:f, seq:i, num:i+1, fileNum:FIRST+i, url:DIR+f, orient: im.naturalWidth > im.naturalHeight ? 'h' : 'v' });
+    im.onerror = () => res({ file:f, seq:i, num:i+1, fileNum:FIRST+i, url:DIR+f, orient:null });
+    im.src = DIR+f;
+  })));
+}
+
+function render(){
+  const z = +$('zoom').value, px = U/ U * 8 * z / 1; // 8 px per inch × zoom
+  const pg = Math.round(+$('pairgap').value*U)/U;
+  const inch = v => v * px;
+  const total = place(cols);
+  const align = $('align').value, PAD = 60;   // vertical padding above/below the wall, in px
+  const hVert = (4*2+pg)*px, H = Math.ceil(hVert) + 2*PAD, mid = H/2;
+  // natural: pairs stay on the midline; singles get a seeded random height inside the band spanned by the tallest stacked pair
+  const band = 4*2+pg, rnd = i => mulberry(+$('seed').value*100003 + i*7919)();
+const strip = $('strip'); strip.innerHTML = '';
+  strip.style.width = inch(PLAN.room + 30) + 'px'; strip.style.height = H + 'px';
+  const ml = document.createElement('div'); ml.id='midline'; ml.style.top = mid+'px'; if (align!=='top') strip.appendChild(ml);
+
+  const draw = (c, ghost, xoff) => {
+    const el = document.createElement('div');
+    el.className = 'col' + (ghost?' ghost':'') + (c===sel?' sel':'');
+    const w = c.w/U, hh = c.orient==='h'?3:4;
+    const totalH = c.images.length===2 ? hh*2+pg : hh;
+    el.style.left = inch(xoff + c.x/U) + 'px'; el.style.width = inch(w) + 'px';
+    const idx = cols.indexOf(c) >= 0 ? cols.indexOf(c) : 0;
+    const slack = Math.max(0, band - totalH) / 2, cy = align==='natural' && c.images.length===1 ? mid + inch((rnd(idx)*2-1) * slack) : mid;
+    el.style.top = (align==='top' ? PAD : cy - inch(totalH)/2) + 'px'; el.style.height = inch(totalH) + 'px';
+    c.images.forEach((im,k) => {
+      const d = document.createElement('div'); d.className='img';
+      d.style.height = inch(hh)+'px'; d.style.top = (k*(inch(hh)+inch(pg)))+'px';
+      d.style.backgroundImage = `url("${im.url}")`; d.dataset.n = im.num; el.appendChild(d);
+    });
+    if (!ghost){ el.onclick = () => pick(c);  }
+    strip.appendChild(el);
+  };
+  cols.forEach(c => draw(c,false,0));
+  const wrapX = total/U; // inches
+  cols.slice(0,8).forEach(c => draw(c,true,wrapX));
+  const seam = document.createElement('div'); seam.className='seam'; seam.style.left = inch(wrapX - PLAN.gap/U/2) + 'px';
+  seam.innerHTML = '<span class="seamlbl">wrap: col 256 → col 1</span>'; strip.appendChild(seam);
+  readout(total, pg);
+}
+
+function readout(total, pg){
+  const { t, cnt } = verify(cols, total, images);
+  const ok = Object.values(t).every(Boolean);
+  const hc = cols.filter(c=>c.orient==='h').length, vc = cols.length-hc;
+  const rows = [
+    ['Total width', `${(total/U).toFixed(3)} in`], ['Columns / gaps', `${cols.length} / ${cols.length}`], ['Gap size', '0.125 in'],
+    ['H columns (4 in)', hc], ['V columns (3 in)', vc],
+    ['H pairs / singles', `${cnt('h',true)} / ${cnt('h',false)}`], ['V pairs / singles', `${cnt('v',true)} / ${cnt('v',false)}`],
+    ['Pair gap (display only)', `${pg} in`],
+  ].map(([a,b]) => `<div class="row"><span>${a}</span><span>${b}</span></div>`);
+  const tests = Object.entries(t).map(([k,v]) => `<div class="row"><span>${k}</span><span class="${v?'pass':'fail'}">${v?'PASS':'FAIL'}</span></div>`);
+  $('readout').innerHTML = `<div>${rows.join('')}</div><div>${tests.join('')}<div class="row"><span><b>Overall</b></span><span class="${ok?'pass':'fail'}">${ok?'PASS':'FAIL'}</span></div></div>`;
+}
+
+function pick(c){ sel = c; render(); showSel(); }
+function showSel(){
+  if (!sel) return;
+  const i = cols.indexOf(sel);
+  $('info').innerHTML = `<b>Column ${i+1} of 256</b> · ${sel.orient==='h'?'horizontal (4 in)':'vertical (3 in)'} · ${sel.images.length===2?'pair':'single'} · x = ${(sel.x/U).toFixed(3)} in<br>` +
+    sel.images.map(im => `<img src="${im.url}" alt=""><span class="hint">#${im.num} (${im.file})</span>`).join(' ');
+}
+
+function rebuild(){
+  cols = layout(images, $('mode').value); sel = null;
+  const pairSet = v => new Set(layout(images, v).filter(c=>c.images.length===2).map(c=>c.images.map(i=>i.num).join('+')));
+  const A = pairSet('A'), cur = pairSet($('mode').value); let same = 0; cur.forEach(p => A.has(p) && same++);
+  $('overlap').textContent = $('mode').value==='A' ? '' : `${same} of ${cur.size} pairs identical to A`;
+  $('info').innerHTML = '<span class="hint">No column selected.</span>'; render();
+}
+
+document.addEventListener('mousemove', e => {
+  const n = e.target.dataset && e.target.dataset.n, t = $('tip');
+  if (n){ t.textContent = '#' + n; t.style.display='block'; t.style.left=(e.clientX+14)+'px'; t.style.top=(e.clientY+14)+'px'; } else t.style.display='none';
+});
+(async function init(){
+  images = await loadAll();
+  const bad = images.filter(i => !i.orient);
+  const h = images.filter(i=>i.orient==='h').length, v = images.filter(i=>i.orient==='v').length;
+  if (bad.length || h !== PLAN.h || v !== PLAN.v || images.length !== PLAN.total){
+    const e = $('err'); e.style.display='block';
+    e.innerHTML = `<b>Image counts don't match the plan.</b> Found ${images.length} images: ${h} horizontal, ${v} vertical${bad.length?`, ${bad.length} failed to load`:''}. Expected 69 horizontal / 296 vertical. Layout stopped — the plan needs recomputing via 3(296−pv)+4(69−ph)+g(365−pv−ph)=847.`;
+    return;
+  }
+  $('mode').onchange = rebuild; $('align').onchange = () => { $('seedwrap').style.display = $('align').value==='natural' ? '' : 'none'; render(); }; $('seed').onchange = render;
+  $('zoom').oninput = () => { $('zv').textContent = (+$('zoom').value).toFixed(1)+'×'; render(); };
+  $('pairgap').onchange = render;
+  rebuild();
+})();
+</script>
+</body>
+</html>
